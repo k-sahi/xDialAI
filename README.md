@@ -9,6 +9,7 @@ A small FastAPI service that analyzes a healthcare benefits-verification convers
 - The model returns a structured response validated with Pydantic.
 - If the API key is unavailable, the OpenAI package is not installed, or the LLM call fails, the service falls back to deterministic rule-based logic.
 - `GET /health` reports whether the application is running in `llm` or `simulated` mode.
+- LLM calls are fully asynchronous (`AsyncOpenAI`), so a slow model response never blocks the worker. Each call has a request timeout (`LLM_TIMEOUT_SECONDS`, default 10 s), automatic retries for transient errors (`LLM_MAX_RETRIES`, default 2) and a per-worker concurrency limit (`LLM_MAX_CONCURRENCY`, default 20). Temperature is 0 and output is capped at 100 tokens; empty or unparseable responses trigger the rule-based fallback.
 
 ## Installation and running the API
 
@@ -101,7 +102,7 @@ For a healthcare workflow, the model should recommend the next question—not ma
 
 Before production deployment, I would:
 
-1. **Make external calls truly asynchronous.** The endpoint is declared `async`, but the current OpenAI client call is synchronous. I would use an asynchronous OpenAI client so one slow request does not block the worker.
+1. **Keep external calls asynchronous and bounded.** The service already uses the asynchronous OpenAI client with timeouts, retries and a concurrency limit. At this volume I would tune those limits from load tests and add a circuit breaker so requests skip straight to the rule-based path while the provider is unhealthy.
 
 2. **Run multiple stateless API instances.** Package the service in a container and deploy it behind a load balancer with horizontal autoscaling. Configure multiple workers per instance based on load testing rather than CPU count alone.
 

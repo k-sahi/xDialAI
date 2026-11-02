@@ -20,7 +20,7 @@ async def get_next_question(request: ConversationRequest):
 
     try:
         if client and os.getenv("OPENAI_API_KEY"):
-            return generate_next_question_llm(request)
+            return await generate_next_question_llm(request)
         else:
             return generate_next_question_simulated(request)
     except Exception as e:
