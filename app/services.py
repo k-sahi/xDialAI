@@ -1,12 +1,30 @@
+import asyncio
 import os
 from typing import List
 from app.schemas import Message, ConversationRequest, NextQuestionResponse, StructuredLLMResponse
 
+# Per-request limits for the LLM call
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "10"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
+LLM_MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY", "20"))
+
 try:
-    from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
+    from openai import AsyncOpenAI
+    client = (
+        AsyncOpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=LLM_MAX_RETRIES,
+        )
+        if os.getenv("OPENAI_API_KEY")
+        else None
+    )
 except ImportError:
     client = None
+
+# Caps how many LLM calls run at once per worker, so a traffic burst
+# can't exhaust the provider's rate limit or the worker's connections.
+_llm_semaphore = asyncio.Semaphore(LLM_MAX_CONCURRENCY)
 
 SYSTEM_PROMPT = """You are an AI assistant for a healthcare voice agent calling insurance companies to verify patient benefits.
 Analyze the transcript between the agent and the insurance representative.
@@ -14,21 +32,26 @@ Determine what information has already been asked and answered (e.g., deductible
 Generate the single next logical question the agent should ask to complete benefit verification. Keep it concise, natural, and professional.
 """
 
-def generate_next_question_llm(request: ConversationRequest) -> NextQuestionResponse:
-    """Extract next question using OpenAI Structured Outputs."""
+async def generate_next_question_llm(request: ConversationRequest) -> NextQuestionResponse:
+    """Extract next question using OpenAI Structured Outputs (non-blocking)."""
     formatted = "\n".join([f"{m.speaker.upper()}: {m.text}" for m in request.conversation])
 
-    completion = client.beta.chat.completions.parse(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Transcript:\n{formatted}"},
-        ],
-        response_format=StructuredLLMResponse,
-    )
+    async with _llm_semaphore:
+        completion = await client.beta.chat.completions.parse(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Transcript:\n{formatted}"},
+            ],
+            response_format=StructuredLLMResponse,
+            temperature=0,
+            max_tokens=100,
+        )
 
-    data: StructuredLLMResponse = completion.choices[0].message.parsed
-    return NextQuestionResponse(next_question=data.next_question)
+    data = completion.choices[0].message.parsed
+    if data is None or not data.next_question.strip():
+        raise ValueError("LLM returned an empty or unparseable response")
+    return NextQuestionResponse(next_question=data.next_question.strip())
 
 def generate_next_question_simulated(request: ConversationRequest) -> NextQuestionResponse:
     """Rule-based simulation fallback for insurance benefit verification."""
